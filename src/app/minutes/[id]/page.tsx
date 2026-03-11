@@ -18,6 +18,8 @@ import {
   X,
   Check,
   Save,
+  Sparkles,
+  Download,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ja } from "date-fns/locale";
@@ -37,6 +39,7 @@ import {
 } from "@/components/ui/dialog";
 import { getMeetingById, saveMeeting, deleteMeeting, generateId } from "@/lib/storage";
 import { formatElapsedTime, exportToMarkdown, exportToText } from "@/lib/export";
+import { MermaidDiagram } from "@/components/meeting/MermaidDiagram";
 import type {
   MeetingMinutes,
   TranscriptEntry,
@@ -54,6 +57,9 @@ export default function MinutesDetailPage() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [isGeneratingDiagram, setIsGeneratingDiagram] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   // 編集用の一時状態
   const [editTitle, setEditTitle] = useState("");
@@ -246,6 +252,115 @@ export default function MinutesDetailPage() {
     [meeting, isEditing, editTitle, editEntries, editSummary, editDecisions, editActions]
   );
 
+  const handleRegenerateSummary = useCallback(async () => {
+    if (!meeting) return;
+    setIsSummarizing(true);
+    try {
+      const res = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entries: meeting.entries,
+          title: meeting.title,
+          participants: meeting.participants,
+          agenda: meeting.agenda,
+        }),
+      });
+
+      if (!res.ok) throw new Error("要約に失敗しました");
+
+      const { summary, decisions, actions } = await res.json();
+      const updated = { ...meeting, summary, decisions, actions };
+      saveMeeting(updated);
+      setMeeting(updated);
+      setEditSummary(summary);
+      setEditDecisions(decisions);
+      setEditActions(actions);
+    } catch {
+      alert("AI要約の生成に失敗しました。しばらく後にお試しください。");
+    } finally {
+      setIsSummarizing(false);
+    }
+  }, [meeting]);
+
+  const handleRegenerateDiagram = useCallback(async () => {
+    if (!meeting) return;
+    setIsGeneratingDiagram(true);
+    try {
+      const res = await fetch("/api/diagram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entries: meeting.entries,
+          title: meeting.title,
+          participants: meeting.participants,
+          agenda: meeting.agenda,
+        }),
+      });
+
+      if (!res.ok) throw new Error("図解の生成に失敗しました");
+
+      const { diagram } = await res.json();
+      const updated = { ...meeting, diagram };
+      saveMeeting(updated);
+      setMeeting(updated);
+    } catch {
+      alert("図解の生成に失敗しました。しばらく後にお試しください。");
+    } finally {
+      setIsGeneratingDiagram(false);
+    }
+  }, [meeting]);
+
+  const handleExportPdf = useCallback(async () => {
+    if (!meeting) return;
+    setIsExportingPdf(true);
+    try {
+      const html2canvas = (await import("html2canvas")).default;
+      const { jsPDF } = await import("jspdf");
+
+      const element = document.getElementById("minutes-content");
+      if (!element) throw new Error("コンテンツが見つかりません");
+
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        logging: false,
+      });
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4",
+      });
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * pageWidth) / canvas.width;
+
+      let heightLeft = imgHeight;
+      let position = 0;
+      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+
+      const dateStr = format(new Date(meeting.createdAt), "yyyy-MM-dd");
+      pdf.save(`${meeting.title}_${dateStr}.pdf`);
+    } catch {
+      alert("PDF出力に失敗しました。もう一度お試しください。");
+    } finally {
+      setIsExportingPdf(false);
+    }
+  }, [meeting]);
+
   // 読み込み中
   if (!isLoaded) {
     return (
@@ -298,7 +413,7 @@ export default function MinutesDetailPage() {
     <div className="min-h-screen pb-8">
       <Header title={displayTitle} showBack />
 
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main id="minutes-content" className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* 会議基本情報 */}
         <section className="mb-8" aria-label="会議基本情報">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
@@ -480,11 +595,53 @@ export default function MinutesDetailPage() {
           )}
         </section>
 
+        {/* 図解セクション */}
+        <section className="mb-8" aria-label="図解">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">図解</h2>
+            {!isEditing && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={handleRegenerateDiagram}
+                disabled={isGeneratingDiagram}
+              >
+                <Sparkles className="h-4 w-4" />
+                {isGeneratingDiagram ? "生成中..." : "図解を再生成"}
+              </Button>
+            )}
+          </div>
+          {isGeneratingDiagram ? (
+            <div className="flex items-center justify-center h-40 rounded-lg border border-gray-200 bg-gray-50">
+              <p className="text-sm text-gray-400 animate-pulse">図解を生成中...</p>
+            </div>
+          ) : meeting.diagram ? (
+            <MermaidDiagram chart={meeting.diagram} />
+          ) : (
+            <p className="text-sm text-gray-400 italic">
+              「図解を再生成」ボタンで会議内容を視覚化できます
+            </p>
+          )}
+        </section>
+
         {/* 要点まとめセクション */}
         <section className="mb-8" aria-label="要点まとめ">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            要点まとめ
-          </h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">要点まとめ</h2>
+            {!isEditing && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={handleRegenerateSummary}
+                disabled={isSummarizing}
+              >
+                <Sparkles className="h-4 w-4" />
+                {isSummarizing ? "生成中..." : "AI要約を再生成"}
+              </Button>
+            )}
+          </div>
           {displaySummary.length > 0 && (
             <ul className="space-y-2 mb-4">
               {displaySummary.map((item, index) => (
@@ -726,7 +883,7 @@ export default function MinutesDetailPage() {
         </section>
 
         {/* エクスポートボタン */}
-        <section className="mb-8" aria-label="エクスポート">
+        <section className="mb-8" aria-label="エクスポート" data-html2canvas-ignore="true">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">
             エクスポート
           </h2>
@@ -748,6 +905,16 @@ export default function MinutesDetailPage() {
             >
               <FileText className="h-4 w-4" />
               テキスト形式でコピー
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={handleExportPdf}
+              disabled={isExportingPdf}
+            >
+              <Download className="h-4 w-4" />
+              {isExportingPdf ? "生成中..." : "PDFでダウンロード"}
             </Button>
           </div>
           {copySuccess && (

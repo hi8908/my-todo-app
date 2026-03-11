@@ -12,6 +12,7 @@ export interface MeetingMinutes {
   summary: string[];
   decisions: Decision[];
   actions: ActionItem[];
+  diagram?: string;
 }
 
 export interface TranscriptEntry {

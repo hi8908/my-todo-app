@@ -55,6 +55,9 @@ export default function RecordPage() {
 
   // 保存状態
   const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<
+    "idle" | "saving" | "analyzing"
+  >("idle");
 
   // 参加者の追加
   const handleAddParticipant = useCallback(() => {
@@ -83,7 +86,7 @@ export default function RecordPage() {
   }, [manualNote, addManualEntry]);
 
   // 議事録の保存
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     if (!title.trim()) {
       alert("会議タイトルを入力してください。");
       return;
@@ -95,6 +98,7 @@ export default function RecordPage() {
     }
 
     setIsSaving(true);
+    setSaveStatus("saving");
 
     const meeting: MeetingMinutes = {
       id: generateId(),
@@ -111,6 +115,46 @@ export default function RecordPage() {
     };
 
     saveMeeting(meeting);
+    setSaveStatus("analyzing");
+
+    try {
+      const [summarizeRes, diagramRes] = await Promise.all([
+        fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            entries: meeting.entries,
+            title: meeting.title,
+            participants: meeting.participants,
+            agenda: meeting.agenda,
+          }),
+        }),
+        fetch("/api/diagram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            entries: meeting.entries,
+            title: meeting.title,
+            participants: meeting.participants,
+            agenda: meeting.agenda,
+          }),
+        }),
+      ]);
+
+      const updated = { ...meeting };
+      if (summarizeRes.ok) {
+        const { summary, decisions, actions } = await summarizeRes.json();
+        Object.assign(updated, { summary, decisions, actions });
+      }
+      if (diagramRes.ok) {
+        const { diagram } = await diagramRes.json();
+        Object.assign(updated, { diagram });
+      }
+      saveMeeting(updated);
+    } catch {
+      // ネットワークエラー等はサイレントフォールバック（議事録本体は保存済み）
+    }
+
     router.push(`/minutes/${meeting.id}`);
   }, [title, participants, agenda, elapsedTime, entries, isListening, stop, router]);
 
@@ -470,7 +514,11 @@ export default function RecordPage() {
             className="w-full gap-2"
           >
             <Save className="h-5 w-5" />
-            {isSaving ? "保存中..." : "議事録を保存"}
+            {saveStatus === "analyzing"
+              ? "AI解析中..."
+              : isSaving
+                ? "保存中..."
+                : "議事録を保存"}
           </Button>
         </div>
       </div>
